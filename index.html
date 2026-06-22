@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NEXOTUS // Obxi <span style="#f77307";>PLAN</span></title>
+<title>NEXOTUS // PM</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700;800;900&family=Barlow:wght@300;400;500;600&family=Share+Tech+Mono&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -272,6 +272,8 @@ td input[type=date]::-webkit-calendar-picker-indicator{filter:invert(15%) sepia(
         <div class="dd-item" onclick="exportXLSX();closeMenus()">Export to Excel (.xlsx)</div>
         <div class="dd-item" onclick="exportXML();closeMenus()">Export to MS Project (.xml)</div>
         <div class="dd-item" onclick="importJSON();closeMenus()">Import Project (.obxp)</div>
+        <div class="dd-item" onclick="importXLSX();closeMenus()">Import from Excel (.xlsx)</div>
+        <div class="dd-item" onclick="importXML();closeMenus()">Import from MS Project (.xml)</div>
         <div class="dd-div"></div>
         <div class="dd-item" onclick="clearAll();closeMenus()" style="color:var(--red)">Clear All Tasks</div>
       </div>
@@ -608,6 +610,8 @@ td input[type=date]::-webkit-calendar-picker-indicator{filter:invert(15%) sepia(
 
 <!-- HIDDEN FILE INPUT FOR IMPORT -->
 <input type="file" id="import-file-input" accept=".obxp,.json" style="display:none" onchange="handleImportFile(this)">
+<input type="file" id="import-xlsx-input" accept=".xlsx,.xls" style="display:none" onchange="handleImportXLSX(this)">
+<input type="file" id="import-xml-input" accept=".xml" style="display:none" onchange="handleImportXML(this)">
 
 <script>
 // ─── DATE UTILS ──────────────────────────────────────────────────────────────
@@ -1551,6 +1555,97 @@ function handleImportFile(input){
       recalc(migrateDeps(raw).map(t=>({...t,computed:{}})),{addUndo:false});
       toast(`Imported ${raw.length} tasks ✓`);
     }catch(err){toast('Import failed: invalid .obxp file');}
+  };
+  r.readAsText(f);
+  input.value='';
+}
+
+function importXLSX(){document.getElementById('import-xlsx-input').click();}
+
+function handleImportXLSX(input){
+  const f=input.files[0];if(!f)return;
+  if(typeof XLSX==='undefined'){toast('SheetJS not loaded');return;}
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      const wb=XLSX.read(e.target.result,{type:'array'});
+      // Look for Task Matrix sheet first, fallback to first sheet
+      const sheetName=wb.SheetNames.includes('Task Matrix')?'Task Matrix':wb.SheetNames[0];
+      const ws=wb.Sheets[sheetName];
+      const rows=XLSX.utils.sheet_to_json(ws,{defval:''});
+      if(!rows.length)throw new Error('Empty sheet');
+      const imported=rows.map((row,i)=>{
+        // Support both our own export headers and generic column names
+        const id=String(row['ID']||row['id']||genId()).trim();
+        const title=String(row['Title']||row['title']||row['Name']||row['name']||'Untitled').trim();
+        const type=String(row['Type']||row['type']||'task').toLowerCase().includes('milestone')?'milestone':'task';
+        const start_date=String(row['Start Date']||row['start_date']||row['Start']||TODAY_STR).trim()||TODAY_STR;
+        const due_date=String(row['Due Date']||row['due_date']||row['Finish']||start_date).trim()||start_date;
+        const progress=parseInt(row['Progress (%)'||'progress']||row['progress']||row['% Complete']||0)||0;
+        const priority=String(row['Priority']||row['priority']||'MEDIUM').toUpperCase();
+        const assignee=String(row['Assignee']||row['assignee']||row['Resource']||'').trim();
+        const budget_cost=parseFloat(row['Budget Cost (RM)']||row['budget_cost']||row['Cost']||0)||0;
+        const actual_cost=parseFloat(row['Actual Cost (RM)']||row['actual_cost']||row['Actual Cost']||0)||0;
+        const qty=parseFloat(row['Qty']||row['qty']||0)||0;
+        const unit_rate=parseFloat(row['Unit Rate (RM)']||row['unit_rate']||0)||0;
+        const notes=String(row['Notes']||row['notes']||'').trim();
+        return{id,title,type,start_date,due_date,bs:start_date,be:due_date,progress,priority,assignee,parent_id:null,dep_links:[],qty,unit_rate,budget_cost,actual_cost,delay_reason:null,locked:false,notes,computed:{}};
+      });
+      _undoStack=[];
+      recalc(imported,{addUndo:false});
+      toast(`Imported ${imported.length} tasks from Excel ✓`);
+    }catch(err){toast('Import failed: '+err.message);}
+  };
+  r.readAsArrayBuffer(f);
+  input.value='';
+}
+
+function importXML(){document.getElementById('import-xml-input').click();}
+
+function handleImportXML(input){
+  const f=input.files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      const parser=new DOMParser();
+      const doc=parser.parseFromString(e.target.result,'application/xml');
+      const parseErr=doc.querySelector('parsererror');
+      if(parseErr)throw new Error('Invalid XML');
+      const taskEls=[...doc.querySelectorAll('Task')];
+      if(!taskEls.length)throw new Error('No tasks found in XML');
+      // Build UID→id map first pass
+      const uidToId={};
+      taskEls.forEach(el=>{
+        const uid=el.querySelector('UID')?.textContent;
+        const wbs=el.querySelector('WBS')?.textContent||'';
+        const name=el.querySelector('Name')?.textContent||'';
+        if(uid&&name)uidToId[uid]=wbs||`NX-${String(uid).padStart(2,'0')}`;
+      });
+      const imported=[];
+      taskEls.forEach(el=>{
+        const name=el.querySelector('Name')?.textContent||'';
+        if(!name)return; // skip empty/summary rows
+        const uid=el.querySelector('UID')?.textContent||'';
+        const wbs=el.querySelector('WBS')?.textContent||'';
+        const id=wbs||uidToId[uid]||`NX-${String(uid).padStart(2,'0')}`;
+        const isMilestone=el.querySelector('Milestone')?.textContent==='1';
+        // Parse MS Project datetime (2026-06-01T08:00:00)
+        const parseMS=s=>s?s.slice(0,10):'';
+        const start_date=parseMS(el.querySelector('Start')?.textContent)||TODAY_STR;
+        const due_date=isMilestone?start_date:(parseMS(el.querySelector('Finish')?.textContent)||start_date);
+        const progress=parseInt(el.querySelector('PercentComplete')?.textContent||0)||0;
+        const budget_cost=parseFloat(el.querySelector('Cost')?.textContent||0)/100||0;
+        const actual_cost=parseFloat(el.querySelector('ActualCost')?.textContent||0)/100||0;
+        const notes=el.querySelector('Notes')?.textContent||'';
+        const priRaw=parseInt(el.querySelector('Priority')?.textContent||500);
+        const priority=priRaw>=900?'CRITICAL':priRaw>=700?'HIGH':priRaw>=400?'MEDIUM':'LOW';
+        imported.push({id,title:name,type:isMilestone?'milestone':'task',start_date,due_date,bs:start_date,be:due_date,progress,priority,assignee:'',parent_id:null,dep_links:[],qty:0,unit_rate:0,budget_cost,actual_cost,delay_reason:null,locked:false,notes,computed:{}});
+      });
+      if(!imported.length)throw new Error('No valid tasks parsed');
+      _undoStack=[];
+      recalc(imported,{addUndo:false});
+      toast(`Imported ${imported.length} tasks from MS Project XML ✓`);
+    }catch(err){toast('Import failed: '+err.message);}
   };
   r.readAsText(f);
   input.value='';
